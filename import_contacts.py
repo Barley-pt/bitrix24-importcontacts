@@ -59,20 +59,27 @@ def map_fields(file_path, headers):
 
 
 # 3. Import contacts based on mappings
-def run_import(file_path, mappings):
-    webhook = simple_input("Enter your Bitrix24 Webhook URL:")
+import os
+
+def run_import(file_path, mappings, webhook):
     if not webhook.endswith("/"):
         webhook += "/"
 
     wb = openpyxl.load_workbook(file_path)
     sheet = wb.active
     headers = [cell.value for cell in sheet[1]]
+
+    # Add a new column: "BITRIX_ID"
+    bitrix_id_col = len(headers)
+    sheet.cell(row=1, column=bitrix_id_col + 1).value = "BITRIX_ID"
+
     success_count = 0
     fail_count = 0
 
-    for row in sheet.iter_rows(min_row=2, values_only=True):
+    for i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
         contact_data = {"fields": {}}
-        for excel_col, bitrix_field in mappings.items():
+        for excel_col, bitrix_field_full in mappings.items():
+            bitrix_field = bitrix_field_full.split(" - ")[0]  # Extract field name only
             value = row[headers.index(excel_col)]
             if value:
                 if bitrix_field in ["EMAIL", "PHONE"]:
@@ -80,13 +87,27 @@ def run_import(file_path, mappings):
                 else:
                     contact_data["fields"][bitrix_field] = value
 
-        r = requests.post(f"{webhook}crm.contact.add.json", json=contact_data)
-        if r.status_code == 200 and r.json().get("result"):
-            success_count += 1
-        else:
+        try:
+            r = requests.post(f"{webhook}crm.contact.add.json", json=contact_data)
+            r_json = r.json()
+            new_id = r_json.get("result")
+            if new_id:
+                success_count += 1
+                sheet.cell(row=i, column=bitrix_id_col + 1).value = new_id
+            else:
+                fail_count += 1
+        except Exception as e:
+            print(f"Error on row {i}: {e}")
             fail_count += 1
 
-    messagebox.showinfo("Import Finished", f"✅ Success: {success_count}\n❌ Failed: {fail_count}")
+    # Save the new version of the Excel
+    dir_name, base_name = os.path.split(file_path)
+    name_only, ext = os.path.splitext(base_name)
+    new_file = os.path.join(dir_name, f"{name_only}_bitrix_imported{ext}")
+    wb.save(new_file)
+
+    messagebox.showinfo("Import Complete", f"✅ Success: {success_count}\n❌ Failed: {fail_count}\n💾 Saved: {new_file}")
+
 
 # 4. Simple text input popup
 def simple_input(prompt_text):
