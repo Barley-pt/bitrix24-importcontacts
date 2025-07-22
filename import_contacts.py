@@ -30,6 +30,9 @@ def select_file():
 
 # 2. GUI to map Excel headers to Bitrix fields
 def map_fields(file_path, headers):
+    webhook = simple_input("Enter your Bitrix24 Webhook URL:")
+    field_keys, field_labels = fetch_bitrix_fields(webhook)
+
     def submit_mappings():
         mappings = {}
         for i, header in enumerate(headers):
@@ -37,7 +40,7 @@ def map_fields(file_path, headers):
             if field:
                 mappings[header] = field
         window.destroy()
-        run_import(file_path, mappings)
+        run_import(file_path, mappings, webhook)
 
     window = tk.Tk()
     window.title("Field Mapping")
@@ -47,12 +50,13 @@ def map_fields(file_path, headers):
     for i, header in enumerate(headers):
         tk.Label(window, text=header).grid(row=i+1, column=0)
         var = tk.StringVar(window)
-        dropdown = tk.OptionMenu(window, var, *[""] + bitrix_fields)
+        dropdown = tk.OptionMenu(window, var, *[""] + [f"{f} - {field_labels[f]}" for f in field_keys])
         dropdown.grid(row=i+1, column=1)
         combo_vars.append(var)
 
     tk.Button(window, text="Start Import", command=submit_mappings).grid(row=len(headers)+1, column=0, columnspan=2)
     window.mainloop()
+
 
 # 3. Import contacts based on mappings
 def run_import(file_path, mappings):
