@@ -6,18 +6,20 @@ import pandas as pd
 import streamlit as st
 from typing import Dict, Any, List
 
-st.set_page_config(page_title="Importar Contatos Bitrix24", layout="wide")
+st.set_page_config(page_title="Bitrix24 Contact Import-beta version", layout="wide")
 
-# -------------------- Utilidades --------------------
+# -------------------- Utilities --------------------
 
 def normalize_webhook(url: str) -> str:
     if not url:
-        return url
-    url = url.rstrip("/")
-    # aceita webhook com ou sem /rest
-    if not url.endswith("/rest"):
-        url = url + "/rest"
-    return url + "/"
+        return ""
+    url = url.strip()
+    # Do NOT append '/rest' here. The user must paste the full webhook:
+    # e.g. https://fvl.bitrix24.com.br/rest/241/rct2v0wt7wair6ie/
+    if not url.endswith("/"):
+        url += "/"
+    return url
+
 
 def field_label(fid: str, fdata: Dict[str, Any]) -> str:
     title = (
@@ -36,12 +38,14 @@ def fetch_contact_fields(webhook: str) -> Dict[str, Any]:
     data = r.json()
     if "result" not in data:
         raise RuntimeError(f"Resposta inesperada: {data}")
-    # filtra tipos graváveis e não-readonly, como no script original
-    allowed = {'string','integer','double','boolean','enumeration','date','datetime'}
-    fields = {
-        k:v for k,v in data["result"].items()
-        if v.get("type") in allowed and not v.get("isReadOnly", False)
-    }
+    allowed = {'string','integer','double','boolean','enumeration','date','datetime','crm_multifield'}
+    fields = {}
+    for k, v in data["result"].items():
+        if k in {"EMAIL", "PHONE"}:
+            fields[k] = v
+            continue
+        if v.get("type") in allowed and not v.get("isReadOnly", False):
+            fields[k] = v
     return fields
 
 def load_dataframe(upload) -> pd.DataFrame:
@@ -51,10 +55,9 @@ def load_dataframe(upload) -> pd.DataFrame:
     elif name.endswith(".xls") or name.endswith(".xlsx"):
         return pd.read_excel(upload, engine="openpyxl")
     else:
-        raise ValueError("Arquivo deve ser .csv, .xls ou .xlsx")
+        raise ValueError("File must be .csv, .xls or .xlsx")
 
 def sanitize_value(v):
-    # remove NaN e converte datas
     if pd.isna(v):
         return None
     if isinstance(v, pd.Timestamp):
@@ -62,7 +65,7 @@ def sanitize_value(v):
     return v
 
 def ensure_multifield(lst: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    # remove vazios e duplicados mantendo ordem
+    # remove empties and duplicates while preserving order
     seen = set()
     cleaned = []
     for item in lst:
@@ -77,8 +80,7 @@ def ensure_multifield(lst: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return cleaned
 
 def find_existing_contact(webhook: str, email: str|None, phone: str|None) -> str|None:
-    # tenta por e-mail e por telefone, retorna o primeiro ID encontrado
-    # Bitrix aceita filtros diretos por EMAIL/PHONE; se quiser precisão, usa "=EMAIL"
+    # try by email and then by phone, return first found ID
     def _query(flt: Dict[str, Any]) -> str|None:
         r = requests.post(
             f"{webhook}crm.contact.list.json",
@@ -116,7 +118,7 @@ def build_payload(row: pd.Series, mapping: Dict[str,str]) -> Dict[str, Any]:
     phones: List[Dict[str,str]] = []
 
     for col, mapped in mapping.items():
-        fid = mapped  # já é a chave Bitrix (ex: "NAME", "LAST_NAME", "EMAIL", "UF_CRM_xxx")
+        fid = mapped
         raw = sanitize_value(row[col])
         if raw is None:
             continue
@@ -145,56 +147,55 @@ def make_excel_with_ids(df_original: pd.DataFrame, id_list: List[str|None]) -> b
 
 # -------------------- UI --------------------
 
-st.title("Importar Contatos para Bitrix24")
+st.title("Import Contacts to Bitrix24")
 
 with st.sidebar:
-    st.header("Configuração")
+    st.header("Setup")
     webhook_in = st.text_input(
-        "Webhook Bitrix24",
-        placeholder="https://SEU_DOMINIO/rest/XX/YY/",
-        help="Cole o webhook completo. Pode terminar com /rest/ ou apenas /; normalizamos automaticamente."
+        "Bitrix24 webhook",
+        placeholder="https://YOUR_DOMAIN/rest/XX/YY/",
+        help="Paste the full webhook. It can end with /rest/ or just /. It will be normalized."
     )
-    dup_check = st.toggle("Checar duplicados por e-mail/telefone", value=True,
-                          help="Se ativo, pesquisa contato existente antes de criar.")
-    uploaded = st.file_uploader("Arquivo (.csv, .xls, .xlsx)", type=["csv","xls","xlsx"])
-    btn_fetch = st.button("Carregar campos")
+    dup_check = st.toggle("Check duplicates by email or phone", value=True,
+                          help="If enabled, the app searches for an existing contact before creating one.")
+    uploaded = st.file_uploader("File (.csv, .xls, .xlsx)", type=["csv","xls","xlsx"])
+    btn_fetch = st.button("Load fields")
 
-# estado
+# state
 if "fields" not in st.session_state: st.session_state.fields = None
 if "df" not in st.session_state: st.session_state.df = None
 if "mapping" not in st.session_state: st.session_state.mapping = {}
 
-# normaliza webhook
+# normalize webhook
 webhook = normalize_webhook(webhook_in) if webhook_in else ""
 
-# carrega campos
+# load fields
 if btn_fetch:
     if not webhook:
-        st.sidebar.error("Informe o webhook.")
+        st.sidebar.error("Enter the webhook.")
     else:
         try:
             st.session_state.fields = fetch_contact_fields(webhook)
-            st.sidebar.success("Campos carregados.")
+            st.sidebar.success("Fields loaded.")
         except Exception as e:
-            st.sidebar.error(f"Falha ao obter campos: {e}")
+            st.sidebar.error(f"Could not fetch fields: {e}")
 
-# carrega dados
+# load data
 if uploaded is not None:
     try:
         st.session_state.df = load_dataframe(uploaded)
-        st.success(f"Arquivo carregado com {len(st.session_state.df)} linhas.")
+        st.success(f"File loaded with {len(st.session_state.df)} rows.")
         st.dataframe(st.session_state.df.head(50), use_container_width=True)
     except Exception as e:
-        st.error(f"Erro ao ler arquivo: {e}")
+        st.error(f"Could not read file: {e}")
 
-# mapeamento
+# mapping
 if st.session_state.df is not None and st.session_state.fields is not None:
-    st.subheader("Mapeamento de colunas → campos do Bitrix24")
+    st.subheader("Map columns → Bitrix24 fields")
 
     df_cols = list(st.session_state.df.columns)
     fields = st.session_state.fields
 
-    # prepara opções ordenadas por rótulo
     sorted_items = sorted(fields.items(), key=lambda kv: field_label(kv[0], kv[1]).lower())
     labels = [field_label(fid, meta) for fid, meta in sorted_items]
     label_to_fid = {field_label(fid, meta): fid for fid, meta in sorted_items}
@@ -206,28 +207,28 @@ if st.session_state.df is not None and st.session_state.fields is not None:
         with (left if i % 2 == 0 else right):
             sel = st.selectbox(
                 f"{col}",
-                ["- não importar -"] + labels,
+                ["- do not import -"] + labels,
                 index=0,
                 key=f"map_{col}"
             )
-            if sel != "- não importar -":
+            if sel != "- do not import -":
                 mapping[col] = label_to_fid[sel]
 
     st.session_state.mapping = mapping
 
     st.markdown("---")
-    st.subheader("Importação")
-    go = st.button("Iniciar importação")
+    st.subheader("Import")
+    go = st.button("Start import")
 
     if go:
         if not webhook:
-            st.error("Informe o webhook.")
+            st.error("Enter the webhook.")
         elif not mapping:
-            st.error("Defina pelo menos um mapeamento.")
+            st.error("Define at least one mapping.")
         else:
             df = st.session_state.df
             total = len(df)
-            progress = st.progress(0, text="Importando...")
+            progress = st.progress(0, text="Importing...")
             status = st.empty()
             logs = []
             ids = []
@@ -235,7 +236,7 @@ if st.session_state.df is not None and st.session_state.fields is not None:
             for idx, row in df.iterrows():
                 fields_payload = build_payload(row, mapping)
 
-                # coleta email/phone simples para a busca (pega primeiro da lista, se existir)
+                # pick first email or phone, if present, for duplicate check
                 email = None
                 phone = None
                 if isinstance(fields_payload.get("EMAIL"), list) and fields_payload["EMAIL"]:
@@ -261,7 +262,7 @@ if st.session_state.df is not None and st.session_state.fields is not None:
                         "contact_id": contact_id or "",
                         "payload": json.dumps(fields_payload, ensure_ascii=False)
                     })
-                    status.write(f"[{len(ids)}/{total}] {'OK' if ok else 'Falha'} - ID: {contact_id or '-'}")
+                    status.write(f"[{len(ids)}/{total}] {'OK' if ok else 'Fail'} - ID: {contact_id or '-'}")
                 except Exception as e:
                     ids.append(None)
                     logs.append({
@@ -273,40 +274,43 @@ if st.session_state.df is not None and st.session_state.fields is not None:
 
                 progress.progress(min(len(ids)/total, 1.0))
 
-            # resultados
             ok_count = sum(1 for i in ids if i)
             fail_count = total - ok_count
-            st.success(f"Concluído. Sucesso: {ok_count} • Falhas: {fail_count}")
+            st.success(f"Done. Success: {ok_count} • Failures: {fail_count}")
 
             log_df = pd.DataFrame(logs, columns=["row","result","contact_id","payload"])
             st.dataframe(log_df, use_container_width=True)
 
-            # download do log CSV
+            # log CSV
             csv_buf = io.StringIO()
             log_df.to_csv(csv_buf, index=False)
-            st.download_button("Baixar log CSV", data=csv_buf.getvalue().encode("utf-8"),
-                               file_name="bitrix_contacts_import_log.csv", mime="text/csv")
+            st.download_button(
+                "Download log CSV",
+                data=csv_buf.getvalue().encode("utf-8"),
+                file_name="bitrix_contacts_import_log.csv",
+                mime="text/csv"
+            )
 
-            # download do Excel com BITRIX_ID
+            # Excel with BITRIX_ID
             try:
                 xlsx_bytes = make_excel_with_ids(df, ids)
                 st.download_button(
-                    "Baixar Excel com BITRIX_ID",
+                    "Download Excel with BITRIX_ID",
                     data=xlsx_bytes,
                     file_name="contacts_bitrix_imported.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             except Exception as e:
-                st.info(f"Não foi possível gerar Excel de saída: {e}")
+                st.info(f"Could not generate output Excel: {e}")
 
-# notas
-with st.expander("Dicas e observações"):
+# notes
+with st.expander("Tips and notes"):
     st.markdown(
         """
-- Se a API acusar campo obrigatório não enviado, mapeie-o antes de importar.
-- Para **EMAIL** e **PHONE**, podes mapear várias colunas diferentes - o app envia como multi-campos.
-- O verificador de duplicados pesquisa por e-mail e/ou telefone usando `crm.contact.list`.
-- O webhook deve ter permissão para `crm.contact.add`.
-- Datas no Excel são convertidas para ISO (YYYY-MM-DD).
+- If the API says a required field is missing, map it before importing.
+- You can map multiple columns to EMAIL and PHONE. The app sends them as multi fields.
+- Duplicate checker searches by EMAIL and PHONE using crm.contact.list.
+- The webhook must allow crm.contact.add.
+- Excel dates are converted to ISO (YYYY-MM-DD).
         """
     )
